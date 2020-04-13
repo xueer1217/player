@@ -73,9 +73,12 @@ message("--------------------")
 message(SDL_INCLUDE_DIR=${SDL_INCLUDE_DIR})
 message(SDL_LIBRARY=${SDL_LIBRARY})
 
-add_executable(player src/main.cpp)
+add_executable(player
+#        src/main.cpp
+#        src/audio_play.cpp
+        src/avplayer.cpp)
 
-target_include_directories( ${PROJECT_NAME}
+target_include_directories(${PROJECT_NAME}
         PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${AVCODEC_INCLUDE_DIR}
@@ -89,7 +92,7 @@ target_include_directories( ${PROJECT_NAME}
         ${SDL_INCLUDE_DIR}
         )
 
-target_link_libraries( ${PROJECT_NAME}
+target_link_libraries(${PROJECT_NAME}
         PRIVATE
         ${AVCODEC_LIBRARY}
         ${AVFORMAT_LIBRARY}

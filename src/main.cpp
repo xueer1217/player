@@ -28,10 +28,6 @@ int event_thread(void *opaque) {
         SDL_PushEvent(&event);
         SDL_Delay(40);
     }
-    thread_exit = true;
-    SDL_Event event;
-    event.type = BREAK_EVENT;
-    SDL_PushEvent(&event);
 
     return 0;
 }
@@ -168,18 +164,9 @@ int main(int argc, char *argv[]) {
     SDL_Event event;
 //    //从视频中读取数据 只处理video
 
-
-//    for (;;) {
-//        SDL_WaitEvent(&event);
-//        if (event.type == SFM_REFRESH_EVENT) {
-
-//    bool bQuit = false;
-
     while (true) {
         SDL_WaitEvent(&event);
         if (event.type == REFRESH_EVENT) {
-//            bool find = false;
-
 //            auto t1 = system_clock::now();
             while (av_read_frame(formatContex, v_pack)==0) {
                 if (v_pack->stream_index == v_idx) {
@@ -188,7 +175,6 @@ int main(int argc, char *argv[]) {
 
             }
             //video 一个packet中包含一个frame
-
             //向解码器中喂数据
             ret = avcodec_send_packet(v_codec_ctx, v_pack);
             if (ret < 0) {
@@ -237,30 +223,14 @@ int main(int argc, char *argv[]) {
 
         } else if (event.type == SDL_QUIT) {
             thread_exit = true;
-        } else if (event.type == BREAK_EVENT) {
-            cout << "break" << endl;
             break;
         }
-
-    }
-
-
-
-//        } else if (event.type == SDL_KEYDOWN) {
-//            if (event.key.keysym.sym == SDLK_SPACE) {
-//                thread_pause = !thread_pause;
-//            }
-//        } else if (event.type == SDL_QUIT) {
-//            thread_exit = 1;
-//        } else if (event.type == SFM_BREAK_EVENT) {
+//        else if (event.type == BREAK_EVENT) {
+//            cout << "break" << endl;
 //            break;
 //        }
-//    }
-    //ffmpeg
 
-
-//
-
+    }
 
     SDL_Quit();
     sws_freeContext(sws_ctx);
