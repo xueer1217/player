@@ -27,7 +27,6 @@ struct packet_queue {
     SDL_cond *cond;
 };
 
-//为什么要设置这些参数
 struct ff_audio_para {
     int freq;
     int channels;
@@ -187,7 +186,7 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
 
             if (swr_ctx != nullptr) { //重采样
                 //重采样输入参数1:输入data buffer
-                const uint8_t **in = (const uint8_t **) frame->extended_buf;
+                const uint8_t **in = (const uint8_t **) frame->extended_data;
                 //重采样输出参数2：单声道的available样本数
                 int out_count = (int64_t) frame->nb_samples * audio_para_tgt.freq / frame->sample_rate + 256;
                 //重采样输出参数1：buffer
@@ -201,7 +200,7 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
                 }
                 //第一次的时候分配给resample_buff一块地址
                 if (resample_buff == nullptr) {
-                    av_fast_malloc(resample_buff, &resample_buff_len, out_size);
+                    av_fast_malloc(&resample_buff, &resample_buff_len, out_size);
                 }
                 if (resample_buff == nullptr) {
                     cout << "av_fast_malloc error" << endl;
@@ -248,6 +247,175 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
     }
 }
 
+
+//int audio_decode_frame(AVCodecContext *p_codec_ctx, AVPacket *p_packet, uint8_t *audio_buf, int buf_size)
+//{
+//    AVFrame *p_frame = av_frame_alloc();
+//
+//    int frm_size = 0;
+//    int res = 0;
+//    int ret = 0;
+//    int nb_samples = 0;             // 重采样输出样本数
+//    uint8_t *p_cp_buf = NULL;
+//    int cp_len = 0;
+//    bool need_new = false;
+//
+//    res = 0;
+//    while (1)
+//    {
+//        need_new = false;
+//
+//        // 1 接收解码器输出的数据，每次接收一个frame
+//        ret = avcodec_receive_frame(p_codec_ctx, p_frame);
+//        if (ret != 0)
+//        {
+//            if (ret == AVERROR_EOF)
+//            {
+//                printf("audio avcodec_receive_frame(): the decoder has been fully flushed\n");
+//                res = 0;
+//                goto exit;
+//            }
+//            else if (ret == AVERROR(EAGAIN))
+//            {
+//                //printf("audio avcodec_receive_frame(): output is not available in this state - "
+//                //       "user must try to send new input\n");
+//                need_new = true;
+//            }
+//            else if (ret == AVERROR(EINVAL))
+//            {
+//                printf("audio avcodec_receive_frame(): codec not opened, or it is an encoder\n");
+//                res = -1;
+//                goto exit;
+//            }
+//            else
+//            {
+//                printf("audio avcodec_receive_frame(): legitimate decoding errors\n");
+//                res = -1;
+//                goto exit;
+//            }
+//        }
+//        else
+//        {
+//            // s_audio_param_tgt是SDL可接受的音频帧数，是main()中取得的参数
+//            // 在main()函数中又有“s_audio_param_src = s_audio_param_tgt”
+//            // 此处表示：如果frame中的音频参数 == s_audio_param_src == s_audio_param_tgt，那音频重采样的过程就免了(因此时s_audio_swr_ctx是NULL)
+//            // 　　　　　否则使用frame(源)和s_audio_param_src(目标)中的音频参数来设置s_audio_swr_ctx，并使用frame中的音频参数来赋值s_audio_param_src
+//            if (p_frame->format         != audio_para_src.fmt            ||
+//                p_frame->channel_layout != audio_para_src.channel_layout ||
+//                p_frame->sample_rate    != audio_para_src.freq)
+//            {
+//                swr_free(&swr_ctx);
+//                // 使用frame(源)和is->audio_tgt(目标)中的音频参数来设置is->swr_ctx
+//                swr_ctx = swr_alloc_set_opts(NULL,
+//                                             audio_para_tgt.channel_layout,
+//                                             audio_para_tgt.fmt,
+//                                             audio_para_tgt.freq,
+//                                                     p_frame->channel_layout,
+//                                             static_cast<AVSampleFormat>(p_frame->format),
+//                                                     p_frame->sample_rate,
+//                                                     0,
+//                                                     NULL);
+//                if (swr_ctx == NULL || swr_init(swr_ctx) < 0)
+//                {
+////                    printf("Cannot create sample rate converter for conversion of %d Hz %s %d channels to %d Hz %s %d channels!\n",
+////                           p_frame->sample_rate, av_get_sample_fmt_name(p_frame->format), p_frame->channels,
+////                           s_audio_param_tgt.freq, av_get_sample_fmt_name(s_audio_param_tgt.fmt), s_audio_param_tgt.channels);
+//                    swr_free(&swr_ctx);
+//                    return -1;
+//                }
+//
+//                // 使用frame中的参数更新s_audio_param_src，第一次更新后后面基本不用执行此if分支了，因为一个音频流中各frame通用参数一样
+//                audio_para_src.channel_layout = p_frame->channel_layout;
+//                audio_para_src.channels       = p_frame->channels;
+//                audio_para_src.freq           = p_frame->sample_rate;
+//                audio_para_src.fmt            = static_cast<AVSampleFormat>(p_frame->format);
+//            }
+//
+//            if (swr_ctx != NULL)        // 重采样
+//            {
+//                // 重采样输入参数1：输入音频样本数是p_frame->nb_samples
+//                // 重采样输入参数2：输入音频缓冲区
+//                const uint8_t **in = (const uint8_t **)p_frame->extended_data;
+//                // 重采样输出参数1：输出音频缓冲区尺寸
+//                // 重采样输出参数2：输出音频缓冲区
+//                uint8_t **out = &resample_buff;
+//                // 重采样输出参数：输出音频样本数(多加了256个样本)
+//                int out_count = (int64_t)p_frame->nb_samples * audio_para_tgt.freq / p_frame->sample_rate + 256;
+//                // 重采样输出参数：输出音频缓冲区尺寸(以字节为单位)
+//                int out_size  = av_samples_get_buffer_size(NULL, audio_para_tgt.channels, out_count, audio_para_tgt.fmt, 0);
+//                if (out_size < 0)
+//                {
+//                    printf("av_samples_get_buffer_size() failed\n");
+//                    return -1;
+//                }
+//
+//                if (resample_buff == NULL)
+//                {
+//                    av_fast_malloc(&resample_buff, &resample_buff_len, out_size);
+//                }
+//                if (resample_buff == NULL)
+//                {
+//                    return AVERROR(ENOMEM);
+//                }
+//                // 音频重采样：返回值是重采样后得到的音频数据中单个声道的样本数
+//                nb_samples = swr_convert(swr_ctx, out, out_count, in, p_frame->nb_samples);
+//                if (nb_samples < 0) {
+//                    printf("swr_convert() failed\n");
+//                    return -1;
+//                }
+//                if (nb_samples == out_count)
+//                {
+//                    printf("audio buffer is probably too small\n");
+//                    if (swr_init(swr_ctx) < 0)
+//                        swr_free(&swr_ctx);
+//                }
+//
+//                // 重采样返回的一帧音频数据大小(以字节为单位)
+//                p_cp_buf = resample_buff;
+//                cp_len = nb_samples * audio_para_tgt.channels * av_get_bytes_per_sample(audio_para_tgt.fmt);
+//            }
+//            else    // 不重采样
+//            {
+//                // 根据相应音频参数，获得所需缓冲区大小
+//                frm_size = av_samples_get_buffer_size(
+//                        NULL,
+//                        p_codec_ctx->channels,
+//                        p_frame->nb_samples,
+//                        p_codec_ctx->sample_fmt,
+//                        1);
+//
+//                printf("frame size %d, buffer size %d\n", frm_size, buf_size);
+//
+//                p_cp_buf = p_frame->data[0];
+//                cp_len = frm_size;
+//            }
+//
+//            // 将音频帧拷贝到函数输出参数audio_buf
+//            memcpy(audio_buf, p_cp_buf, cp_len);
+//
+//            res = cp_len;
+//            goto exit;
+//        }
+//
+//        // 2 向解码器喂数据，每次喂一个packet
+//        if (need_new)
+//        {
+//            ret = avcodec_send_packet(p_codec_ctx, p_packet);
+//            if (ret != 0)
+//            {
+//                printf("avcodec_send_packet() failed %d\n", ret);
+//                res = -1;
+//                goto exit;
+//            }
+//        }
+//    }
+//
+//    exit:
+//    av_frame_unref(p_frame);
+//    return res;
+//}
+
+
 //sdl回调函数：格式固定
 //读队列、解码、播放
 //stream音频缓冲区地址；将解码之后的音频数据填入此缓冲区；len缓冲区大小，单位字节；
@@ -262,6 +430,7 @@ void sdl_audio_callback(void *userdata, uint8_t *stream, int len) {
     AVPacket *packet;
     int get_size = 0; //packet解码之后的音频数据大小
     while (len > 0) { //直到缓冲区填满之后该函数返回
+
         if (decode_finish) {
             return;
         }

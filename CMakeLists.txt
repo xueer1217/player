@@ -76,7 +76,8 @@ message(SDL_LIBRARY=${SDL_LIBRARY})
 add_executable(player
 #        src/main.cpp
 #        src/audio_play.cpp
-        src/avplayer.cpp)
+        src/avplayer.cpp
+        )
 
 target_include_directories(${PROJECT_NAME}
         PRIVATE

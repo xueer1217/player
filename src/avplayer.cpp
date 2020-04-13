@@ -16,6 +16,10 @@ extern "C" {
 #include <iostream>
 #include <constant.h>
 
+//这两个大小只是粗略估计
+#define SDL_AUDIO_BUFFER_SIZE 1024
+#define MAX_AUDIO_FRAME_SIZE 192000
+
 #define REFRESH_EVENT (SDL_USEREVENT + 1)
 using namespace std;
 
@@ -28,10 +32,26 @@ struct packet_queue {
     SDL_cond *cond;
 };
 
+struct ff_audio_para {
+    int freq;
+    int channels;
+    __int64_t channel_layout;
+    enum AVSampleFormat fmt;
+    int frame_size;
+    int bytes_per_sec;
+
+};
+
 packet_queue a_pkt_queue, v_pkt_queue;
 bool vdecode_finish = false;
 bool adecode_finish = false;
-SDL_Window *screen;
+int v_idx = -1;
+int a_idx = -1;
+ff_audio_para audio_para_src;
+ff_audio_para audio_para_tgt;
+struct SwrContext *swr_ctx;
+uint8_t *resample_buff; //重采样输出缓冲区
+unsigned int resample_buff_len = 0;//重采样输出缓冲区长度
 
 void packet_queue_init(packet_queue *queue) {
     memset(queue, 0, sizeof(packet_queue));
@@ -115,7 +135,7 @@ int init_codec_ctx(AVFormatContext *f_ctx, AVCodecContext **c_ctx, int idx) {
         return ERR;
     }
     *c_ctx = avcodec_alloc_context3(codec);
-    if (c_ctx == nullptr) {
+    if (*c_ctx == nullptr) {
         cout << "avcodec_alloc_context3 error,idx" << idx << endl;
         return ERR;
     }
@@ -183,16 +203,14 @@ int video_thread(void *data) {
         return ERR;
     }
 
-    //创建sdl window render texture rect
-    //todo 目前creat window 放在子线程中
-//
-//    SDL_Window *screen = SDL_CreateWindow("player", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, w, h,
-//                                          SDL_WINDOW_SHOWN);
-//
-//    if (!screen) {
-//        cout << "create window error" <<SDL_GetError()<< endl;
-//        return ERR;
-//    }
+
+    SDL_Window *screen = SDL_CreateWindow("player", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, w, h,
+                                          SDL_WINDOW_SHOWN);
+
+    if (!screen) {
+        cout << "create window error" << SDL_GetError() << endl;
+        return ERR;
+    }
 
     SDL_Renderer *renderer = SDL_CreateRenderer(screen, -1, 0);
     SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, w, h);
@@ -214,7 +232,7 @@ int video_thread(void *data) {
         }
         if (packet_queue_pop(&v_pkt_queue, packet, 1) <= 0) {
             cout << "video packet queue is empty.." << endl;
-            SDL_Delay(1000);
+            SDL_Delay(100);
             continue;
         }
         ret = avcodec_send_packet(codec_ctx, packet);
@@ -265,7 +283,6 @@ int video_thread(void *data) {
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, nullptr, &rect);
         SDL_RenderPresent(renderer);
-
         SDL_WaitEvent(&event);
 
     }
@@ -275,17 +292,238 @@ int video_thread(void *data) {
 
 int packet_thread(void *data) {
 
-    AVFormatContext* format_ctx= (AVFormatContext*) data;
+    int ret = -1;
+    //初始化队列
+    packet_queue_init(&v_pkt_queue);
+    packet_queue_init(&a_pkt_queue);
+    //读数据存储到队列当中
+    AVFormatContext *format_ctx = (AVFormatContext *) data;
 
+    AVPacket *packet = (AVPacket *) av_malloc(sizeof(AVPacket));
 
+    long long idx = 0;
+    //读取数据
+    while (true) {
+        ret = av_read_frame(format_ctx, packet);
+//        cout<<idx++<<endl;
+        if (ret < 0) {
+            if (ret == AVERROR_EOF) {
+                cout << "read end od file" << endl;
+                av_packet_unref(packet);
+                packet = nullptr;
+                packet_queue_push(&v_pkt_queue, packet);
+                packet_queue_push(&a_pkt_queue, packet);
+                break;
+            } else {
+                cout << "av_read_frame error" << endl;
+                return ERR;
+            }
+        } else {
 
+            if (packet->stream_index == v_idx) {
+                packet_queue_push(&v_pkt_queue, packet);
+            } else if (packet->stream_index == a_idx) {
+                packet_queue_push(&a_pkt_queue, packet);
+            } else {
+                av_packet_unref(packet);
+            }
+
+        }
+    }
+
+    while (!vdecode_finish || !adecode_finish) {
+        SDL_Delay(1000);
+    }
+
+    return 0;
 }
 
-int open_video_stream(AVFormatContext *f_ctx, AVCodecContext **c_ctx, int idx) {
+/*
+ *
+ * FFmpeg音频解码后的数据是存放在AVFrame结构中的。
+ * Packed格式，frame.data[0]或frame.extended_data[0]包含所有的音频数据中。
+ * Planar格式，frame.data[i]或者frame.extended_data[i]表示第i个声道的数据（假设声道0是第一个
+ * AVFrame.data数组大小固定为8，如果声道数超过8，需要从frame.extended_data获取声道数据。
+*/
+int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buff, int buff_size) {
+
+    AVFrame *frame = av_frame_alloc();
+    bool needNewPakcet = false;
+    int ret = -1;
+    int nb_resample; //每次重采样后的单声道样本数
+    uint8_t *c_buff;
+    int c_buff_size;
+    while (true) {
+        needNewPakcet = false;
+        //判断是否需要packet
+        ret = avcodec_receive_frame(codec_ctx, frame);
+        if (ret != 0) {
+            if (ret == AVERROR(EAGAIN)) {
+                needNewPakcet = true;
+            } else if (ret == AVERROR_EOF) {
+                cout << "decoder has been flushed" << endl;
+                av_frame_free(&frame);
+                return ret;
+            } else {
+                cout << "avcodec_receive_frame error" << endl;
+                av_frame_free(&frame);
+                return ret;
+            }
+        } else {
+            //解码之前先判断是否需要重采样
+            if (frame->channel_layout != audio_para_src.channel_layout ||
+                frame->format != audio_para_src.fmt ||
+                frame->sample_rate != audio_para_src.freq) {
+                swr_free(&swr_ctx);
+                swr_ctx = swr_alloc_set_opts(nullptr,
+                                             audio_para_tgt.channel_layout,
+                                             audio_para_tgt.fmt,
+                                             audio_para_tgt.freq,
+                                             frame->channel_layout,
+                                             static_cast<AVSampleFormat>(frame->format),
+                                             frame->sample_rate,
+                                             0,
+                                             nullptr
+                );
+
+                if (swr_ctx == nullptr || swr_init(swr_ctx) < 0) {
+                    cout << "swr_alloc_set_opts error or swr init error" << endl;
+                    swr_free(&swr_ctx);
+                    return ERR;
+                }
+
+                //一个音频流中各参数都一致 因此只用修改一次就可以
+                audio_para_src.channel_layout = frame->channel_layout;
+                audio_para_src.fmt = static_cast<AVSampleFormat>(frame->format);
+                audio_para_src.freq = frame->sample_rate;
+            }
+
+            if (swr_ctx != nullptr) { //重采样
+                //重采样输入参数1:输入data buffer
+                const uint8_t **in = (const uint8_t **) frame->extended_data;
+                //重采样输出参数2：单声道的available样本数
+                int out_count = (int64_t) frame->nb_samples * audio_para_tgt.freq / frame->sample_rate + 256;
+                //重采样输出参数1：buffer
+                uint8_t **out = &resample_buff;
+                int out_size = av_samples_get_buffer_size(nullptr, audio_para_tgt.channels, out_count,
+                                                          audio_para_tgt.fmt, 0);
+                if (out_size < 0) {
+                    cout << "av_samples_get_buffer_size error" << endl;
+                    av_frame_free(&frame);
+                    return out_size;
+                }
+                //第一次的时候分配给resample_buff一块地址
+                if (resample_buff == nullptr) {
+                    av_fast_malloc(&resample_buff, &resample_buff_len, out_size);
+                }
+                if (resample_buff == nullptr) {
+                    cout << "av_fast_malloc error" << endl;
+                    av_frame_free(&frame);
+                    return ERR;
+                };
+                nb_resample = swr_convert(swr_ctx,
+                                          out,
+                                          out_count,
+                                          in,
+                                          frame->nb_samples
+                );
+                if (nb_resample < 0) {
+                    cout << "swr_convert error" << endl;
+                    av_frame_free(&frame);
+                    return ERR;
+                }
+                if (nb_resample == out_count) {
+                    cout << "audio buffer is too small" << endl;
+                }
+
+                c_buff = resample_buff;
+                c_buff_size = audio_para_tgt.channels * nb_resample * av_get_bytes_per_sample(audio_para_tgt.fmt);
+            } else {
+                c_buff = frame->data[0];
+                //todo 验证这个是否可以
+                c_buff_size = av_samples_get_buffer_size(nullptr, frame->channels, frame->nb_samples,
+                                                         static_cast<AVSampleFormat>(frame->format), 1);
+            }
+            memcpy(buff, c_buff, c_buff_size);
+            av_frame_free(&frame);
+            return c_buff_size;
+        }
+        if (needNewPakcet) {
+            ret = avcodec_send_packet(codec_ctx, packet);
+            if (ret != 0) {
+                cout << "avcodec_send_packet error" << endl;
+                av_frame_free(&frame);
+                av_packet_unref(packet);
+                return ret;
+            }
+        }
+
+    }
+}
+
+//sdl回调函数：格式固定
+//读队列、解码、播放
+//stream音频缓冲区地址；将解码之后的音频数据填入此缓冲区；len缓冲区大小，单位字节；
+void sdl_audio_callback(void *userdata, uint8_t *stream, int len) {
+    AVCodecContext *c_ctx = (AVCodecContext *) userdata;
+
+    uint8_t audio_buff[(MAX_AUDIO_FRAME_SIZE * 3) / 2];//保存每次解码之后的数据
+    int copy_len = 0;//每次发送给缓冲区的大小
+    static uint32_t audio_len = 0; //新取到的已解码数据大小
+    static uint32_t send_len = 0; // 已发送数据大小
+
+    AVPacket *packet;
+    int get_size = 0; //packet解码之后的音频数据大小
+    while (len > 0) { //直到缓冲区填满之后该函数返回
+        if (adecode_finish) {
+            SDL_PauseAudio(1);
+            cout << "audio decode finish" << endl;
+            return;
+        }
+        if (send_len >= audio_len) {
+            packet = (AVPacket *) av_malloc(sizeof(AVPacket));
+            //从队列中取出一个packet
+            if (packet_queue_pop(&a_pkt_queue, packet, 1) <= 0) {
+                cout << "audio packet queue is empty.." << endl;
+                SDL_Delay(100);
+                continue;
+            }
+
+            //解码packet
+            get_size = audio_decode_frame(c_ctx, packet, audio_buff, sizeof(audio_buff));
+            if (get_size < 0) {
+                //输出一段静音
+                audio_len = 1024;
+                memset(audio_buff, 0, audio_len);
+                av_packet_unref(packet);
+            } else if (get_size == 0) { //解码缓冲区被冲洗，解码完毕
+                adecode_finish = true;
+            } else {
+                audio_len = get_size;
+                av_packet_unref(packet);
+            }
+            send_len = 0;
+
+        }
+
+        copy_len = audio_len - send_len;
+        if (copy_len > len) {
+            copy_len = len;
+        }
+
+        //todo 这里可不可以不强制转换
+        memcpy(stream, (uint8_t *) audio_buff + send_len, copy_len);
+
+        stream += copy_len;
+        send_len += copy_len;
+        len -= copy_len;
+    }
+}
 
 
+int open_video_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
     //初始化codec_ctx
-    init_codec_ctx(f_ctx, c_ctx, idx);
+    init_codec_ctx(f_ctx, &c_ctx, idx);
     //创建定时器和解码线程
     // 帧率为：avg_frame_rate.num / avg_frame_rate.den
 
@@ -297,7 +535,8 @@ int open_video_stream(AVFormatContext *f_ctx, AVCodecContext **c_ctx, int idx) {
     cout << "frame rate is" + to_string(frame_rate) + " fps and interval is " + to_string(interval) + " ms" << endl;
     //为解码线程的定时器
     SDL_AddTimer(interval, video_thread_timer, nullptr);
-    SDL_CreateThread(video_thread, "video_thread", *c_ctx);
+    video_thread(c_ctx);
+//    SDL_CreateThread(video_thread, "video_thread", *c_ctx);
 
     return 0;
 
@@ -305,6 +544,48 @@ int open_video_stream(AVFormatContext *f_ctx, AVCodecContext **c_ctx, int idx) {
 
 int open_audio_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
 
+    init_codec_ctx(f_ctx, &c_ctx, idx);
+
+    SDL_AudioSpec wanted_spec; //sdl设备支持的音频参数
+    SDL_AudioSpec actual_spec;
+
+
+    //打开音频设备并创建音频处理线程
+    //设置参数，打开音频设备;如果设置了回调函数，sdl会以特定频率调用回调函数，在回调函数中获取音频数据
+    wanted_spec.freq = c_ctx->sample_rate;
+    wanted_spec.format = AUDIO_S16SYS;
+    wanted_spec.channels = c_ctx->channels;
+    wanted_spec.silence = 0;
+    wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE; //SDL声音缓冲区大小
+    wanted_spec.callback = sdl_audio_callback; //回调函数
+    wanted_spec.userdata = c_ctx; //回调函数的参数
+
+
+    //按照wanted参数打开audio设备，实际的参数将会返回给actual_spec；SDL在单独的线程中实现对音频的处理
+    if (SDL_OpenAudio(&wanted_spec, &actual_spec) != 0) {
+        cout << "open audio error" << endl;
+        return ERR;
+    }
+    //根据sdl音频参数构建音频重采样参数；因为解码之后的frame音频格式不一定能被sdl支持，因此需要frame重采样（转换格式）再送入sdl音频缓冲区
+    //一下参数必须保证可以被sdl支持
+    audio_para_tgt.freq = actual_spec.freq;
+    audio_para_tgt.fmt = AV_SAMPLE_FMT_S16;
+    audio_para_tgt.channels = actual_spec.channels;
+    audio_para_tgt.channel_layout = av_get_default_channel_layout(actual_spec.channels);
+    audio_para_tgt.frame_size = av_samples_get_buffer_size(nullptr, actual_spec.channels, 1, audio_para_tgt.fmt, 1);
+    audio_para_tgt.bytes_per_sec = av_samples_get_buffer_size(nullptr, actual_spec.channels, audio_para_tgt.freq,
+                                                              audio_para_tgt.fmt, 1);
+
+    if (audio_para_tgt.bytes_per_sec <= 0 || audio_para_tgt.frame_size <= 0) {
+        cout << "av_samples_get_buffer_size error" << endl;
+        return ERR;
+    }
+    audio_para_src = audio_para_tgt;
+
+    //dsl开始调用回调函数
+    SDL_PauseAudio(0);
+
+    return 0;
 }
 
 
@@ -318,8 +599,6 @@ int main(int argc, char *argv[]) {
     AVCodecContext *v_codec_ctx = nullptr;
     AVCodecContext *a_codec_ctx = nullptr;
     AVPacket *pakcet = nullptr;
-    int v_idx = -1;
-    int a_idx = -1;
 
     int ret = 0;
     if (argc < 2) {
@@ -331,8 +610,8 @@ int main(int argc, char *argv[]) {
         cout << "open input error" << endl;
         return ERR;
     }
-    if (avformat_find_stream_info(format_ctx, nullptr)< 0) {
-        cout << "find stream info error "<< endl;
+    if (avformat_find_stream_info(format_ctx, nullptr) < 0) {
+        cout << "find stream info error " << endl;
         return ERR;
     }
     av_dump_format(format_ctx, 0, argv[1], 0);
@@ -354,75 +633,22 @@ int main(int argc, char *argv[]) {
         return ERR;
     }
 
-    SDL_CreateThread(packet_thread,"packet_thread", format_ctx);
+    SDL_CreateThread(packet_thread, "packet_thread", format_ctx);
 
-
-
-    //init sdl
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
-        cout << "sdl init error" << endl;
+    //初始化sdl系统
+    if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_VIDEO)) {
+        cout << "init sdl error:" << SDL_GetError() << endl;
         return ERR;
     }
 
 
-    screen = SDL_CreateWindow("player", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, format_ctx->streams[v_idx]->codecpar->width, format_ctx->streams[v_idx]->codecpar->height,
-            SDL_WINDOW_SHOWN);
+    open_audio_stream(format_ctx, a_codec_ctx, a_idx);
 
 
-    if (!screen) {
-        cout << "create window error" <<SDL_GetError()<< endl;
-        return ERR;
-    }
-
-    SDL_Renderer *renderer = SDL_CreateRenderer(screen, -1, 0);
-    SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, w, h);
-
-    SDL_Rect rect;
-    rect.x = 0;
-    rect.y = 0;
-    rect.w = w;
-    rect.h = h;
+    open_video_stream(format_ctx, v_codec_ctx, v_idx);
 
 
-    open_video_stream(format_ctx, &v_codec_ctx, v_idx);
-
-    AVPacket* packet = (AVPacket*)av_malloc(sizeof(AVPacket));
-
-    long long idx = 0;
-    //读取数据
-    while (true) {
-        ret = av_read_frame(format_ctx, packet);
-//        cout<<idx++<<endl;
-        if(ret<0){
-            if(ret ==AVERROR_EOF){
-                cout<<"read end od file"<<endl;
-                av_packet_unref(packet);
-                packet = nullptr;
-
-                packet_queue_push(&v_pkt_queue,packet);
-                packet_queue_push(&a_pkt_queue,packet);
-                break;
-            }else{
-                cout<<"av_read_frame error"<<endl;
-                return ERR;
-            }
-        }else{
-
-            if(packet->stream_index == v_idx){
-                packet_queue_push(&v_pkt_queue,packet);
-            }else if(packet->stream_index == a_idx){
-                packet_queue_push(&a_pkt_queue,packet);
-            }else{
-                av_packet_unref(packet);
-            }
-
-        }
-
-    }
-
-    while(!vdecode_finish){
-        SDL_Delay(1000);
-    }
+    return 0;
 
 
 }
