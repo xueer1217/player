@@ -73,10 +73,22 @@ message("--------------------")
 message(SDL_INCLUDE_DIR=${SDL_INCLUDE_DIR})
 message(SDL_LIBRARY=${SDL_LIBRARY})
 
+
+#main 仅播放画面
+#audio_play 仅播放声音
+#avplayer 声音和画面同时播放
+
 add_executable(player
-#        src/main.cpp
+#        src/video_play.cpp
 #        src/audio_play.cpp
-        src/avplayer.cpp
+#        src/avplayer.cpp
+        src/avsync/main.cpp
+        src/avsync/player.cpp
+        src/avsync/demux.cpp
+        src/avsync/video.cpp
+        src/avsync/audio.cpp
+        src/avsync/packet.cpp
+        src/avsync/frame.cpp
         )
 
 target_include_directories(${PROJECT_NAME}

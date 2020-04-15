@@ -160,6 +160,7 @@ uint32_t video_thread_timer(uint32_t interval, void *param) {
     return interval;
 }
 
+//video解码和播放线程
 int video_thread(void *data) {
 
     AVCodecContext *codec_ctx = (AVCodecContext *) data;
@@ -590,9 +591,9 @@ int open_audio_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
 
 
 //packet
-//主线程处理video packet
+//主线程 video解码和播放
 //packet线程 获取packet
-//audio thream 处理audio packet
+//audio thread audio解码和播放
 int main(int argc, char *argv[]) {
 
     AVFormatContext *format_ctx = nullptr;
