@@ -74,12 +74,11 @@ message(SDL_INCLUDE_DIR=${SDL_INCLUDE_DIR})
 message(SDL_LIBRARY=${SDL_LIBRARY})
 
 
-#main 仅播放画面
+#video_play 仅播放画面
 #audio_play 仅播放声音
-#avplayer 声音和画面同时播放
+#avplayer 音画同步播放
 
 add_executable(player
-#        src/player.cpp
 #        src/video_play.cpp
 #        src/audio_play.cpp
         src/avplayer.cpp
