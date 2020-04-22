@@ -260,7 +260,7 @@ static void video_refresh(void *opaque, double *remaining_time)
 {
     player_stat_t *is = (player_stat_t *)opaque;
     double time;
-    static bool first_frame = true;
+    static bool first_frame = true;//静态局部变量
 
     retry:
     if (frame_queue_nb_remaining(&is->video_frm_queue) == 0)  // 所有帧已显示
@@ -289,7 +289,7 @@ static void video_refresh(void *opaque, double *remaining_time)
 
     /* compute nominal last_duration */
     last_duration = vp_duration(is, lastvp, vp);        // 上一帧播放时长：vp->pts - lastvp->pts
-    delay = compute_target_delay(last_duration, is);    // 根据视频时钟和同步时钟的差值，计算delay值
+    delay = compute_target_delay(last_duration, is);    // 根据视频时钟和同步时钟的差值，计算delay值 （上一帧播放了多久才应该播放当前帧
 
     time= av_gettime_relative()/1000000.0;
     // 当前帧播放时刻(is->frame_timer+delay)大于当前时刻(time)，表示播放时刻未到
@@ -308,6 +308,7 @@ static void video_refresh(void *opaque, double *remaining_time)
         is->frame_timer = time;
     }
 
+    //为什么
     SDL_LockMutex(is->video_frm_queue.mutex);
     if (!isnan(vp->pts))
     {
@@ -327,6 +328,7 @@ static void video_refresh(void *opaque, double *remaining_time)
             goto retry;
         }
     }
+
 
     // 删除当前读指针元素，读指针+1。若未丢帧，读指针从lastvp更新到vp；若有丢帧，读指针从vp更新到nextvp
     frame_queue_next(&is->video_frm_queue);

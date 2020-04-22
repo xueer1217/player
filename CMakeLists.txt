@@ -79,16 +79,18 @@ message(SDL_LIBRARY=${SDL_LIBRARY})
 #avplayer 声音和画面同时播放
 
 add_executable(player
+#        src/player.cpp
 #        src/video_play.cpp
 #        src/audio_play.cpp
-#        src/avplayer.cpp
-        src/avsync/main.cpp
-        src/avsync/player.cpp
-        src/avsync/demux.cpp
-        src/avsync/video.cpp
-        src/avsync/audio.cpp
-        src/avsync/packet.cpp
-        src/avsync/frame.cpp
+        src/avplayer.cpp
+#        src/avsync/main.cpp
+#        src/avsync/player.cpp
+#        src/avsync/demux.cpp
+#        src/avsync/video.cpp
+#        src/avsync/audio.cpp
+#        src/avsync/packet.cpp
+#        src/avsync/frame.cpp
+#        src/player.cpp
         )
 
 target_include_directories(${PROJECT_NAME}

@@ -86,8 +86,9 @@ static int stream_has_enough_packets(AVStream *st, int stream_id, packet_queue_t
     return stream_id < 0 ||
            queue->abort_request ||
            (st->disposition & AV_DISPOSITION_ATTACHED_PIC) ||
-           (queue->nb_packets > MIN_FRAMES &&
-            (!queue->duration || av_q2d(st->time_base) * queue->duration > 1.0)); //时间戳*时间基 = 实际的时刻值(以秒为单位)
+           (queue->nb_packets > MIN_FRAMES );
+//            (!queue->duration || av_q2d(st->time_base) * queue->duration > 1.0)
+             //时间戳*时间基 = 实际的时刻值(以秒为单位)
 }
 
 /* this thread gets the stream from the disk or the network */

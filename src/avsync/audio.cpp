@@ -113,7 +113,7 @@ static int audio_decode_thread(void *arg)
             if (!(af = frame_queue_peek_writable(&is->audio_frm_queue)))
                 goto the_end;
 
-            af->pts = (p_frame->pts == AV_NOPTS_VALUE) ? NAN : p_frame->pts * av_q2d(tb);
+            af->pts =  (p_frame->pts == AV_NOPTS_VALUE) ? NAN : p_frame->pts * av_q2d(tb);
             af->pos = p_frame->pkt_pos;
             //-af->serial = is->auddec.pkt_serial;
             // 当前帧包含的(单个声道)采样数/采样率就是当前帧的播放时长

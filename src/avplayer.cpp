@@ -15,6 +15,7 @@ extern "C" {
 
 #include <iostream>
 #include <constant.h>
+#include <mutex>
 
 //这两个大小只是粗略估计
 #define SDL_AUDIO_BUFFER_SIZE 1024
@@ -42,6 +43,13 @@ struct ff_audio_para {
 
 };
 
+struct av_clock{
+    AVRational stream_time_base;
+    int64_t clock = 0;
+    SDL_mutex *mutex;
+    SDL_cond *cond;
+};
+
 packet_queue a_pkt_queue, v_pkt_queue;
 bool vdecode_finish = false;
 bool adecode_finish = false;
@@ -53,12 +61,39 @@ struct SwrContext *swr_ctx;
 uint8_t *resample_buff; //重采样输出缓冲区
 unsigned int resample_buff_len = 0;//重采样输出缓冲区长度
 
+av_clock audio_clock;
+av_clock video_clock;
+int interval;
+int interval_standard;
+
+void init_clock(av_clock* clock){
+    memset(clock, 0, sizeof(av_clock));
+    clock->mutex = SDL_CreateMutex();
+    clock->cond = SDL_CreateCond();
+}
+
 void packet_queue_init(packet_queue *queue) {
     memset(queue, 0, sizeof(packet_queue));
     queue->mutex = SDL_CreateMutex(); //创建一个互斥对象并初始化成解锁状态
     queue->cond = SDL_CreateCond();
 }
 
+void set_pts( av_clock* clock,int64_t pts){
+    SDL_LockMutex(clock->mutex);
+    clock->clock = pts;
+//    cout<<clock->clock<<endl;
+    SDL_CondSignal(clock->cond);
+    SDL_UnlockMutex(clock->mutex);
+}
+
+int64_t get_clock(av_clock* clock){
+    int64_t timestamp =0;
+    SDL_LockMutex(clock->mutex);
+    timestamp = clock->clock;
+    SDL_CondSignal(clock->cond);
+    SDL_UnlockMutex(clock->mutex);
+    return timestamp;
+}
 //写到队列尾部
 int packet_queue_push(packet_queue *queue, AVPacket *packet) {
 
@@ -152,13 +187,16 @@ int init_codec_ctx(AVFormatContext *f_ctx, AVCodecContext **c_ctx, int idx) {
 
 }
 
-uint32_t video_thread_timer(uint32_t interval, void *param) {
-
+void  push_refresh_event(){
     SDL_Event event;
     event.type = REFRESH_EVENT;
     SDL_PushEvent(&event);
-    return interval;
 }
+//uint32_t video_thread_timer(uint32_t interval, void *param) {
+//
+//   push_refresh_event();
+//    return interval;
+//}
 
 //video解码和播放线程
 int video_thread(void *data) {
@@ -228,8 +266,9 @@ int video_thread(void *data) {
     SDL_Event event;
     //读取packet 解码
     while (true) {
+        SDL_WaitEvent(&event);
         if (vdecode_finish) {
-            break;
+            continue;
         }
         if (packet_queue_pop(&v_pkt_queue, packet, 1) <= 0) {
             cout << "video packet queue is empty.." << endl;
@@ -262,6 +301,9 @@ int video_thread(void *data) {
                 return ERR;
             }
         }
+        if(fm_raw->best_effort_timestamp != AV_NOPTS_VALUE){
+            set_pts(&video_clock,fm_raw->best_effort_timestamp * av_q2d(video_clock.stream_time_base) * 1000);
+        }
         //图像转换
         sws_scale(sws_ctx,
                   (const uint8_t *const *) fm_raw->data,
@@ -271,6 +313,16 @@ int video_thread(void *data) {
                   fm_yuv->data,
                   fm_yuv->linesize
         );
+
+
+        auto diff = get_clock(&video_clock) - get_clock(&audio_clock);
+//        cout<<diff<<endl;
+        if(diff > 30){
+            interval = interval + 20;
+        }else if(diff < 0 && abs(diff) > 30){
+            interval = interval_standard;
+            push_refresh_event();
+        }
         SDL_UpdateYUVTexture(
                 texture,
                 &rect,
@@ -284,7 +336,6 @@ int video_thread(void *data) {
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, nullptr, &rect);
         SDL_RenderPresent(renderer);
-        SDL_WaitEvent(&event);
 
     }
 
@@ -308,26 +359,29 @@ int packet_thread(void *data) {
         ret = av_read_frame(format_ctx, packet);
 //        cout<<idx++<<endl;
         if (ret < 0) {
-            if (ret == AVERROR_EOF) {
-                cout << "read end od file" << endl;
-                av_packet_unref(packet);
-                packet = nullptr;
-                packet_queue_push(&v_pkt_queue, packet);
-                packet_queue_push(&a_pkt_queue, packet);
-                break;
-            } else {
-                cout << "av_read_frame error" << endl;
-                return ERR;
-            }
+            cout<<"read end of file"<<endl;
+            break;
+//            if (ret == AVERROR_EOF) {
+//                cout << "read end of file" << endl;
+//                av_packet_unref(packet);
+//                packet = nullptr;
+//                packet_queue_push(&v_pkt_queue, packet);
+//                packet_queue_push(&a_pkt_queue, packet);
+//                break;
+//            } else {
+//                cout << "av_read_frame error" << endl;
+//                return ERR;
+//            }
         } else {
-
+//            cout<<"find"<<endl;
             if (packet->stream_index == v_idx) {
                 packet_queue_push(&v_pkt_queue, packet);
             } else if (packet->stream_index == a_idx) {
                 packet_queue_push(&a_pkt_queue, packet);
-            } else {
-                av_packet_unref(packet);
             }
+//            } else {
+//                av_packet_unref(packet);
+//            }
 
         }
     }
@@ -450,6 +504,12 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
             return c_buff_size;
         }
         if (needNewPakcet) {
+            //更新时间戳
+            if (packet->pts != AV_NOPTS_VALUE) {
+                set_pts(&audio_clock,packet->pts * av_q2d(audio_clock.stream_time_base) * 1000 );
+            }
+            set_pts(&audio_clock,audio_clock.clock + 1000 * packet->size/((double) 44100 * 2 * 2));
+
             ret = avcodec_send_packet(codec_ctx, packet);
             if (ret != 0) {
                 cout << "avcodec_send_packet error" << endl;
@@ -512,7 +572,6 @@ void sdl_audio_callback(void *userdata, uint8_t *stream, int len) {
             copy_len = len;
         }
 
-        //todo 这里可不可以不强制转换
         memcpy(stream, (uint8_t *) audio_buff + send_len, copy_len);
 
         stream += copy_len;
@@ -521,21 +580,34 @@ void sdl_audio_callback(void *userdata, uint8_t *stream, int len) {
     }
 }
 
+int video_refresh (void *data){
+
+    while(true){
+       push_refresh_event();
+        SDL_Delay(interval);
+    }
+
+}
 
 int open_video_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
     //初始化codec_ctx
     init_codec_ctx(f_ctx, &c_ctx, idx);
+    init_clock(&video_clock);
+    video_clock.stream_time_base = f_ctx->streams[idx]->time_base;
     //创建定时器和解码线程
     // 帧率为：avg_frame_rate.num / avg_frame_rate.den
 
     int num = f_ctx->streams[idx]->avg_frame_rate.num;
     int den = f_ctx->streams[idx]->avg_frame_rate.den;
     int frame_rate = (den > 0) ? num / den : 25;
-    int interval = (num > 0) ? (den * 1000) / num : 40;
+    interval = (num > 0) ? (den * 1000) / num : 40;
+    interval_standard = interval;
 
     cout << "frame rate is" + to_string(frame_rate) + " fps and interval is " + to_string(interval) + " ms" << endl;
     //为解码线程的定时器
-    SDL_AddTimer(interval, video_thread_timer, nullptr);
+
+    SDL_CreateThread(video_refresh,"video_refresh", nullptr);
+//    SDL_AddTimer(interval, video_thread_timer, nullptr);
     video_thread(c_ctx);
 //    SDL_CreateThread(video_thread, "video_thread", *c_ctx);
 
@@ -546,6 +618,9 @@ int open_video_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
 int open_audio_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
 
     init_codec_ctx(f_ctx, &c_ctx, idx);
+
+    init_clock(&audio_clock);
+    audio_clock.stream_time_base = f_ctx->streams[idx]->time_base;
 
     SDL_AudioSpec wanted_spec; //sdl设备支持的音频参数
     SDL_AudioSpec actual_spec;
@@ -596,7 +671,7 @@ int open_audio_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
 //audio thread audio解码和播放
 int main(int argc, char *argv[]) {
 
-    AVFormatContext *format_ctx = nullptr;
+    AVFormatContext *format_ctx = avformat_alloc_context();
     AVCodecContext *v_codec_ctx = nullptr;
     AVCodecContext *a_codec_ctx = nullptr;
     AVPacket *pakcet = nullptr;
@@ -633,20 +708,24 @@ int main(int argc, char *argv[]) {
         cout << "find video stream error" << endl;
         return ERR;
     }
-
-    SDL_CreateThread(packet_thread, "packet_thread", format_ctx);
-
     //初始化sdl系统
     if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_VIDEO)) {
         cout << "init sdl error:" << SDL_GetError() << endl;
         return ERR;
     }
 
+    SDL_CreateThread(packet_thread, "packet_thread", format_ctx);
+
 
     open_audio_stream(format_ctx, a_codec_ctx, a_idx);
 
-
     open_video_stream(format_ctx, v_codec_ctx, v_idx);
+
+    while(true){
+        SDL_Delay(1000);
+    }
+
+
 
 
     return 0;

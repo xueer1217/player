@@ -64,7 +64,7 @@ extern  "C"{
 #define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
 
 typedef struct {
-    double pts;                     // 当前帧(待播放)显示时间戳，播放后，当前帧变成上一帧
+    double pts;                     // 当前帧(待播放)显示时间戳，播放后，当前帧变成上一帧 每帧播放时时间戳会被更新过来
     double pts_drift;               // 当前帧显示时间戳与当前系统时钟时间的差值
     double last_updated;            // 当前时钟(如视频时钟)最后一次更新时间，也可称当前时钟时间
     double speed;                   // 时钟速度控制，用于控制播放速度
@@ -107,12 +107,12 @@ typedef struct {
     double pts;           /* presentation timestamp for the frame */
     double duration;      /* estimated duration of the frame */
     int64_t pos;                    // frame对应的packet在输入文件中的地址偏移
-    int width;
-    int height;
-    int format;
-    AVRational sar;
-    int uploaded;
-    int flip_v;
+    int width; //没用到
+    int height; //没用到
+    int format; //没用到
+    AVRational sar; //没用到
+    int uploaded;//没用到
+    int flip_v; //没用到
 }   frame_t;
 
 typedef struct {
@@ -151,6 +151,7 @@ typedef struct {
 
     struct SwsContext *img_convert_ctx;
     struct SwrContext *audio_swr_ctx;
+
     AVFrame *p_frm_yuv;
 
     audio_param_t audio_param_src;
@@ -163,6 +164,7 @@ typedef struct {
     int audio_cp_index;                 // 当前音频帧中已拷入SDL音频缓冲区的位置索引(指向第一个待拷贝字节)
     int audio_write_buf_size;           // 当前音频帧中尚未拷入SDL音频缓冲区的数据量，audio_frm_size = audio_cp_index + audio_write_buf_size
     double audio_clock;
+
     int audio_clock_serial;
 
     int abort_request;
