@@ -40,10 +40,11 @@ struct ff_audio_para {
     enum AVSampleFormat fmt;
     int frame_size;
     int bytes_per_sec;
+    int samples;
 
 };
 
-struct av_clock{
+struct av_clock {
     AVRational stream_time_base;
     int64_t clock = 0;
     SDL_mutex *mutex;
@@ -55,8 +56,8 @@ bool vdecode_finish = false;
 bool adecode_finish = false;
 int v_idx = -1;
 int a_idx = -1;
-ff_audio_para audio_para_src;
-ff_audio_para audio_para_tgt;
+//ff_audio_para audio_para_src;
+ff_audio_para audio_para_tgt;//swr 参数
 struct SwrContext *swr_ctx;
 uint8_t *resample_buff; //重采样输出缓冲区
 unsigned int resample_buff_len = 0;//重采样输出缓冲区长度
@@ -66,7 +67,7 @@ av_clock video_clock;
 int interval;
 int interval_standard;
 
-void init_clock(av_clock* clock){
+void init_clock(av_clock *clock) {
     memset(clock, 0, sizeof(av_clock));
     clock->mutex = SDL_CreateMutex();
     clock->cond = SDL_CreateCond();
@@ -78,7 +79,7 @@ void packet_queue_init(packet_queue *queue) {
     queue->cond = SDL_CreateCond();
 }
 
-void set_pts( av_clock* clock,int64_t pts){
+void set_pts(av_clock *clock, int64_t pts) {
     SDL_LockMutex(clock->mutex);
     clock->clock = pts;
 //    cout<<clock->clock<<endl;
@@ -86,14 +87,15 @@ void set_pts( av_clock* clock,int64_t pts){
     SDL_UnlockMutex(clock->mutex);
 }
 
-int64_t get_clock(av_clock* clock){
-    int64_t timestamp =0;
+int64_t get_clock(av_clock *clock) {
+    int64_t timestamp = 0;
     SDL_LockMutex(clock->mutex);
     timestamp = clock->clock;
     SDL_CondSignal(clock->cond);
     SDL_UnlockMutex(clock->mutex);
     return timestamp;
 }
+
 //写到队列尾部
 int packet_queue_push(packet_queue *queue, AVPacket *packet) {
 
@@ -159,17 +161,41 @@ int packet_queue_pop(packet_queue *queue, AVPacket *packet, int block) {
 
 }
 
+void init_swr(SwrContext **swr_ctx, int64_t out_ch_layout, enum AVSampleFormat out_sample_fmt, int out_sample_rate,
+              int64_t in_ch_layout, enum AVSampleFormat in_sample_fmt, int in_sample_rate) {
+
+    *swr_ctx = swr_alloc_set_opts(nullptr,
+                                  out_ch_layout,
+                                  out_sample_fmt,
+                                  out_sample_rate,
+                                  in_ch_layout,
+                                  in_sample_fmt,
+                                  in_sample_rate,
+                                  0,
+                                  nullptr);
+
+
+    if (swr_init(*swr_ctx) < 0) {
+        cout << "Failed to initialize the resampling context" << endl;
+        if (*swr_ctx) {
+            swr_free(swr_ctx);
+            *swr_ctx = NULL;
+        }
+    }
+
+}
 
 int init_codec_ctx(AVFormatContext *f_ctx, AVCodecContext **c_ctx, int idx) {
 
-    AVCodecParameters *codec_para = f_ctx->streams[idx]->codecpar;
-    int codec_type = codec_para->codec_type;
-    AVCodec *codec = avcodec_find_decoder(codec_para->codec_id);
+    AVCodecParameters *codec_para = f_ctx->streams[idx]->codecpar; //可以获取各个媒体流的编码器信息，从而对编码器进行初始化
+//    int codec_type = codec_para->codec_type;
+    AVCodec *codec = avcodec_find_decoder(
+            codec_para->codec_id);//avcodec_find_decoder和avcodec_parameters_to_context，将编码器根据媒体流中的参数进行初始化
     if (codec == nullptr) {
         cout << "av_codec_decoder error,idx" << idx << endl;
         return ERR;
     }
-    *c_ctx = avcodec_alloc_context3(codec);
+    *c_ctx = avcodec_alloc_context3(codec);//对编码器codecCtx进行内存初始化
     if (*c_ctx == nullptr) {
         cout << "avcodec_alloc_context3 error,idx" << idx << endl;
         return ERR;
@@ -187,7 +213,7 @@ int init_codec_ctx(AVFormatContext *f_ctx, AVCodecContext **c_ctx, int idx) {
 
 }
 
-void  push_refresh_event(){
+void push_refresh_event() {
     SDL_Event event;
     event.type = REFRESH_EVENT;
     SDL_PushEvent(&event);
@@ -301,8 +327,8 @@ int video_thread(void *data) {
                 return ERR;
             }
         }
-        if(fm_raw->best_effort_timestamp != AV_NOPTS_VALUE){
-            set_pts(&video_clock,fm_raw->best_effort_timestamp * av_q2d(video_clock.stream_time_base) * 1000);
+        if (fm_raw->best_effort_timestamp != AV_NOPTS_VALUE) {
+            set_pts(&video_clock, fm_raw->best_effort_timestamp * av_q2d(video_clock.stream_time_base) * 1000);
         }
         //图像转换
         sws_scale(sws_ctx,
@@ -317,12 +343,13 @@ int video_thread(void *data) {
 
         auto diff = get_clock(&video_clock) - get_clock(&audio_clock);
 //        cout<<diff<<endl;
-        if(diff > 30){
+        if (diff > 30) {
             interval = interval + 20;
-        }else if(diff < 0 && abs(diff) > 30){
+        } else if (diff < 0 && abs(diff) > 20) {
             interval = interval_standard;
             push_refresh_event();
         }
+        cout << diff << endl;
         SDL_UpdateYUVTexture(
                 texture,
                 &rect,
@@ -359,7 +386,7 @@ int packet_thread(void *data) {
         ret = av_read_frame(format_ctx, packet);
 //        cout<<idx++<<endl;
         if (ret < 0) {
-            cout<<"read end of file"<<endl;
+            cout << "read end of file" << endl;
             break;
 //            if (ret == AVERROR_EOF) {
 //                cout << "read end of file" << endl;
@@ -405,9 +432,7 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
     AVFrame *frame = av_frame_alloc();
     bool needNewPakcet = false;
     int ret = -1;
-    int nb_resample; //每次重采样后的单声道样本数
-    uint8_t *c_buff;
-    int c_buff_size;
+
     while (true) {
         needNewPakcet = false;
         //判断是否需要packet
@@ -425,21 +450,15 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
                 return ret;
             }
         } else {
-            //解码之前先判断是否需要重采样
-            if (frame->channel_layout != audio_para_src.channel_layout ||
-                frame->format != audio_para_src.fmt ||
-                frame->sample_rate != audio_para_src.freq) {
-                swr_free(&swr_ctx);
-                swr_ctx = swr_alloc_set_opts(nullptr,
-                                             audio_para_tgt.channel_layout,
-                                             audio_para_tgt.fmt,
-                                             audio_para_tgt.freq,
-                                             frame->channel_layout,
-                                             static_cast<AVSampleFormat>(frame->format),
-                                             frame->sample_rate,
-                                             0,
-                                             nullptr
-                );
+            //第一次初始化swr并且初始化resampler_buff
+            if (!swr_ctx) {
+
+                init_swr(&swr_ctx, audio_para_tgt.channel_layout,
+                         audio_para_tgt.fmt,
+                         audio_para_tgt.freq,
+                         frame->channel_layout,
+                         static_cast<AVSampleFormat>(frame->format),
+                         frame->sample_rate);
 
                 if (swr_ctx == nullptr || swr_init(swr_ctx) < 0) {
                     cout << "swr_alloc_set_opts error or swr init error" << endl;
@@ -447,19 +466,8 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
                     return ERR;
                 }
 
-                //一个音频流中各参数都一致 因此只用修改一次就可以
-                audio_para_src.channel_layout = frame->channel_layout;
-                audio_para_src.fmt = static_cast<AVSampleFormat>(frame->format);
-                audio_para_src.freq = frame->sample_rate;
-            }
-
-            if (swr_ctx != nullptr) { //重采样
-                //重采样输入参数1:输入data buffer
-                const uint8_t **in = (const uint8_t **) frame->extended_data;
-                //重采样输出参数2：单声道的available样本数
-                int out_count = (int64_t) frame->nb_samples * audio_para_tgt.freq / frame->sample_rate + 256;
-                //重采样输出参数1：buffer
-                uint8_t **out = &resample_buff;
+//                int out_count = (int64_t) frame->nb_samples * audio_para_tgt.freq / frame->sample_rate + 256;
+                int out_count = audio_para_tgt.samples;
                 int out_size = av_samples_get_buffer_size(nullptr, audio_para_tgt.channels, out_count,
                                                           audio_para_tgt.fmt, 0);
                 if (out_size < 0) {
@@ -467,6 +475,7 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
                     av_frame_free(&frame);
                     return out_size;
                 }
+
                 //第一次的时候分配给resample_buff一块地址
                 if (resample_buff == nullptr) {
                     av_fast_malloc(&resample_buff, &resample_buff_len, out_size);
@@ -476,39 +485,25 @@ int audio_decode_frame(AVCodecContext *codec_ctx, AVPacket *packet, uint8_t *buf
                     av_frame_free(&frame);
                     return ERR;
                 };
-                nb_resample = swr_convert(swr_ctx,
-                                          out,
-                                          out_count,
-                                          in,
-                                          frame->nb_samples
-                );
-                if (nb_resample < 0) {
-                    cout << "swr_convert error" << endl;
-                    av_frame_free(&frame);
-                    return ERR;
-                }
-                if (nb_resample == out_count) {
-                    cout << "audio buffer is too small" << endl;
-                }
-
-                c_buff = resample_buff;
-                c_buff_size = audio_para_tgt.channels * nb_resample * av_get_bytes_per_sample(audio_para_tgt.fmt);
-            } else {
-                c_buff = frame->data[0];
-                //todo 验证这个是否可以
-                c_buff_size = av_samples_get_buffer_size(nullptr, frame->channels, frame->nb_samples,
-                                                         static_cast<AVSampleFormat>(frame->format), 1);
             }
-            memcpy(buff, c_buff, c_buff_size);
+            //重采样
+            int len = swr_convert(swr_ctx, &resample_buff,audio_para_tgt.samples ,
+                                  (const uint8_t **) frame->data, frame->nb_samples);
+
+            int dst_bufsize = len * audio_para_tgt.channels *
+                              av_get_bytes_per_sample(audio_para_tgt.fmt);
+
+            memcpy(buff, resample_buff,dst_bufsize);
             av_frame_free(&frame);
-            return c_buff_size;
+            return dst_bufsize;
         }
+
         if (needNewPakcet) {
             //更新时间戳
             if (packet->pts != AV_NOPTS_VALUE) {
-                set_pts(&audio_clock,packet->pts * av_q2d(audio_clock.stream_time_base) * 1000 );
+                set_pts(&audio_clock, packet->pts * av_q2d(audio_clock.stream_time_base) * 1000);
             }
-            set_pts(&audio_clock,audio_clock.clock + 1000 * packet->size/((double) 44100 * 2 * 2));
+//            set_pts(&audio_clock, audio_clock.clock + 1000 * packet->size / ((double) 44100 * 2 * 2));//这一句是做什么的
 
             ret = avcodec_send_packet(codec_ctx, packet);
             if (ret != 0) {
@@ -541,7 +536,7 @@ void sdl_audio_callback(void *userdata, uint8_t *stream, int len) {
             cout << "audio decode finish" << endl;
             return;
         }
-        if (send_len >= audio_len) {
+        if (send_len >= audio_len) { //解码得到的数据已经全部放到待播放buffer中，所以要继续解码
             packet = (AVPacket *) av_malloc(sizeof(AVPacket));
             //从队列中取出一个packet
             if (packet_queue_pop(&a_pkt_queue, packet, 1) <= 0) {
@@ -580,10 +575,10 @@ void sdl_audio_callback(void *userdata, uint8_t *stream, int len) {
     }
 }
 
-int video_refresh (void *data){
+int video_refresh(void *data) {
 
-    while(true){
-       push_refresh_event();
+    while (true) {
+        push_refresh_event();
         SDL_Delay(interval);
     }
 
@@ -606,7 +601,7 @@ int open_video_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
     cout << "frame rate is" + to_string(frame_rate) + " fps and interval is " + to_string(interval) + " ms" << endl;
     //为解码线程的定时器
 
-    SDL_CreateThread(video_refresh,"video_refresh", nullptr);
+    SDL_CreateThread(video_refresh, "video_refresh", nullptr);
 //    SDL_AddTimer(interval, video_thread_timer, nullptr);
     video_thread(c_ctx);
 //    SDL_CreateThread(video_thread, "video_thread", *c_ctx);
@@ -615,9 +610,10 @@ int open_video_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
 
 }
 
+//初始化解码器，初始化swr，开始进行sdl播放
 int open_audio_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
 
-    init_codec_ctx(f_ctx, &c_ctx, idx);
+    init_codec_ctx(f_ctx, &c_ctx, idx); //初始化解码器
 
     init_clock(&audio_clock);
     audio_clock.stream_time_base = f_ctx->streams[idx]->time_base;
@@ -635,6 +631,7 @@ int open_audio_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
     wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE; //SDL声音缓冲区大小
     wanted_spec.callback = sdl_audio_callback; //回调函数
     wanted_spec.userdata = c_ctx; //回调函数的参数
+//    wanted_spec.samples =
 
 
     //按照wanted参数打开audio设备，实际的参数将会返回给actual_spec；SDL在单独的线程中实现对音频的处理
@@ -651,30 +648,29 @@ int open_audio_stream(AVFormatContext *f_ctx, AVCodecContext *c_ctx, int idx) {
     audio_para_tgt.frame_size = av_samples_get_buffer_size(nullptr, actual_spec.channels, 1, audio_para_tgt.fmt, 1);
     audio_para_tgt.bytes_per_sec = av_samples_get_buffer_size(nullptr, actual_spec.channels, audio_para_tgt.freq,
                                                               audio_para_tgt.fmt, 1);
+    audio_para_tgt.samples = actual_spec.samples;
 
     if (audio_para_tgt.bytes_per_sec <= 0 || audio_para_tgt.frame_size <= 0) {
         cout << "av_samples_get_buffer_size error" << endl;
         return ERR;
     }
-    audio_para_src = audio_para_tgt;
-
-    //dsl开始调用回调函数
+    //sdl开始调用回调函数
     SDL_PauseAudio(0);
 
     return 0;
 }
 
 
-//packet
-//主线程 video解码和播放
+//三个线程分别
+//主线程 audio解码和播放
 //packet线程 获取packet
-//audio thread audio解码和播放
+//video thread audio解码和播放
 int main(int argc, char *argv[]) {
 
     AVFormatContext *format_ctx = avformat_alloc_context();
     AVCodecContext *v_codec_ctx = nullptr;
     AVCodecContext *a_codec_ctx = nullptr;
-    AVPacket *pakcet = nullptr;
+//    AVPacket *pakcet = nullptr;
 
     int ret = 0;
     if (argc < 2) {
@@ -721,11 +717,9 @@ int main(int argc, char *argv[]) {
 
     open_video_stream(format_ctx, v_codec_ctx, v_idx);
 
-    while(true){
+    while (true) {
         SDL_Delay(1000);
     }
-
-
 
 
     return 0;

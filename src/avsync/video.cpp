@@ -429,7 +429,7 @@ static int open_video_playing(void *arg)
 
     // 1. 创建SDL窗口，SDL 2.0支持多窗口
     //    SDL_Window即运行程序后弹出的视频窗口，同SDL 1.x中的SDL_Surface
-    is->sdl_video.window = SDL_CreateWindow("simple ffplayer",
+    is->sdl_video.window = SDL_CreateWindow("player",
                                             SDL_WINDOWPOS_UNDEFINED,// 不关心窗口X坐标
                                             SDL_WINDOWPOS_UNDEFINED,// 不关心窗口Y坐标
                                             is->sdl_video.rect.w,
